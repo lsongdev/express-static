@@ -1,6 +1,6 @@
 const url = require('url');
 const mime = require('mime2');
-const { resolve, join } = require('path');
+const { resolve, join, relative, isAbsolute, sep } = require('path');
 const fs = require('fs');
 
 const { stat } = fs.promises;
@@ -16,6 +16,10 @@ const call = p =>
  */
 module.exports = (root = '.', options) => {
   root = resolve(root);
+  const isWithinRoot = filename => {
+    const pathname = relative(root, filename);
+    return pathname !== '..' && !pathname.startsWith('..' + sep) && !isAbsolute(pathname);
+  };
   const defaults = {
     index: 'index.html',
     listDirectory: false,
@@ -33,7 +37,7 @@ module.exports = (root = '.', options) => {
   return async (req, res, next) => {
     const { pathname } = url.parse(req.url);
     let filename = join(root, pathname);
-    if (filename.indexOf(root) !== 0) return next();
+    if (!isWithinRoot(filename)) return next();
     const sendFile = async (filename, s) => {
       const mtime = new Date(s.mtimeMs).toUTCString();
       if (req.headers['if-modified-since'] === mtime) {
@@ -52,7 +56,8 @@ module.exports = (root = '.', options) => {
     if (err) return next(err);
     if (s.isDirectory()) {
       if (index) {
-        const a = join(filename, index)
+        const a = join(filename, index);
+        if (!isWithinRoot(a)) return next();
         const [err, b] = await call(stat(a));
         if (!err) return sendFile(a, b);
       };
