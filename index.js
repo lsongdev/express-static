@@ -27,9 +27,12 @@ module.exports = function(root, options){
   return function(req, res, next){
     var pathname = url.parse(req.url).pathname;
     var filename = path.join(root, pathname);
-    if(filename.indexOf(root) !== 0) return next();
     if(filename.endsWith('/') && typeof options.index === 'string')
       filename += options.index;
+    // Check the final path by directory boundary, not by a shared name prefix.
+    var relative = path.relative(root, filename);
+    if(relative === '..' || relative.indexOf('..' + path.sep) === 0 || path.isAbsolute(relative))
+      return next();
     fs.stat(filename, function(err, stat){
       if(err) return next(err);
       if(stat.isDirectory()){

@@ -1,6 +1,6 @@
 {
   "name": "express-static",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "serve static files for express",
   "main": "index.js",
   "scripts": {
