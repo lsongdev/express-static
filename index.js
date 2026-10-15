@@ -1,107 +1,100 @@
-const url = require('url');
-const mime = require('mime2');
-const { resolve, join, relative, isAbsolute, sep } = require('path');
-const fs = require('fs');
+'use strict';
 
-const { stat } = fs.promises;
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { pipeline } = require('node:stream');
+const mime = require('mime-types');
+const { contains, permitted, parseRequest, validateOptions } = require('./lib/paths');
+const renderDirectory = require('./lib/directory');
 
-const call = p =>
-  p.then(r => [null, r], e => [e]);
+const missing = err => err.code === 'ENOENT' || err.code === 'ENOTDIR';
 
-/**
- * [exports description]
- * @param  {[type]} root    [description]
- * @param  {[type]} options [description]
- * @return {[type]}         [description]
- */
-module.exports = (root = '.', options) => {
-  root = resolve(root);
-  const isWithinRoot = filename => {
-    const pathname = relative(root, filename);
-    return pathname !== '..' && !pathname.startsWith('..' + sep) && !isAbsolute(pathname);
-  };
-  const defaults = {
-    index: 'index.html',
-    listDirectory: false,
-  };
-  const {
-    index, listDirectory,
-  } = Object.assign({}, defaults, options);
-  /**
-   * [function description]
-   * @param  {[type]}   req  [description]
-   * @param  {[type]}   res  [description]
-   * @param  {Function} next [description]
-   * @return {[type]}        [description]
-   */
-  return async (req, res, next) => {
-    const { pathname } = url.parse(req.url);
-    let filename = join(root, pathname);
-    if (!isWithinRoot(filename)) return next();
-    const sendFile = async (filename, s) => {
-      const mtime = new Date(s.mtimeMs).toUTCString();
-      if (req.headers['if-modified-since'] === mtime) {
-        res.writeHead(304);
-        return res.end();
-      }
-      res.statusCode = 200;
-      const type = mime.lookup(filename);
-      const charset = /^text\/|^application\/(javascript|json)/.test(type) ? 'UTF-8' : false;
-      res.setHeader('Last-Modified', mtime);
-      res.setHeader('Content-Length', s.size);
-      res.setHeader('Content-Type', type + (charset ? '; charset=' + charset : ''));
-      fs.createReadStream(filename).pipe(res);
-    };
-    const [err, s] = await call(stat(filename));
-    if (err) return next(err);
-    if (s.isDirectory()) {
-      if (index) {
-        const a = join(filename, index);
-        if (!isWithinRoot(a)) return next();
-        const [err, b] = await call(stat(a));
-        if (!err) return sendFile(a, b);
-      };
-      if (listDirectory === true) 
-        return renderDirectory(root, filename, res);
-      return next();
+/** Create framework-independent (req, res, next) static file middleware. */
+module.exports = function serve(root = '.', options = {}) {
+  if (typeof root !== 'string') throw new TypeError('root must be a string');
+  const settings = validateOptions(options);
+  root = path.resolve(root);
+
+  return async function staticFiles(req, res, next) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    let handled;
+    try {
+      handled = await handleRequest(root, settings, req, res);
+    } catch (err) {
+      return next(missing(err) ? undefined : err);
     }
-    return sendFile(filename, s);
+    // Invoke downstream middleware outside our I/O error boundary.
+    if (!handled) return next();
   };
 };
-/**
- * [renderDirectory description]
- * @param  {[type]}   dir      [description]
- * @param  {Function} callback [description]
- * @return {[type]}            [description]
- */
-async function renderDirectory(cwd, dir, res) {
-  var content = '';
-  content += '<h1>Index of ' + dir.replace(cwd, '') + '</h1>';
-  content += '<hr />';
-  fs.readdir(dir, async (err, files) => {
-    if (err) return;
-    content += '<table style="min-width: 50%;" >';
-    content += '<tr>';
-    content += '<th style="text-align: left;" >name</th>';
-    content += '<th>date</th>';
-    content += '<th>size</th>';
-    content += '</tr>';
-    content += '<tr>';
-    content += '<td><a href="..">../</a></td>';
-    content += '</tr>';
-    for (let filename of files) {
-      const s = await stat(join(dir, filename));
-      filename = filename + (s.isDirectory() ? '/' : '');
-      content += '<tr>';
-      content += '<td><a href="' + filename + '">' + filename + '</a></td>';
-      content += '<td style="text-align: center;" >' + (s.mtime || '-') + '</td>';
-      content += '<td style="text-align: center;" >' + (s.size) + '</td>';
-      content += '</tr>';
+
+async function handleRequest(root, settings, req, res) {
+  const { pathname, rawPath, query } = parseRequest(req.url);
+  let filename = path.join(root, pathname);
+  if (!contains(root, filename) || !permitted(root, filename, settings)) return false;
+
+  const realRoot = await fs.realpath(root);
+  filename = await fs.realpath(filename);
+  if (!contains(realRoot, filename) || !permitted(realRoot, filename, settings)) return false;
+  const stat = await fs.stat(filename);
+  if (stat.isDirectory()) {
+    // Relative locations keep HTML links working and preserve mount prefixes.
+    if (!rawPath.endsWith('/')) {
+      const segment = rawPath.slice(rawPath.lastIndexOf('/') + 1);
+      res.writeHead(301, { Location: './' + segment + '/' + query });
+      res.end();
+      return true;
     }
-    content += '</table>';
-    content += '<hr/>';
-    content += 'Powered by <a href="https://github.com/song940/kelp-static" >kelp-static</a>';
-    res.setHeader('Content-Type', 'text/html');
-    res.end(content);
-  });
+    if (settings.index !== false) {
+      try {
+        const realIndex = await fs.realpath(path.join(filename, settings.index));
+        if (!contains(realRoot, realIndex) || !permitted(realRoot, realIndex, settings)) return false;
+        if ((await fs.stat(realIndex)).isFile()) return await sendFile(realIndex, req, res);
+      } catch (err) {
+        if (!missing(err)) throw err;
+      }
+    }
+    if (!settings.listDirectory) return false;
+    const html = await renderDirectory(realRoot, filename, pathname, settings);
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': Buffer.byteLength(html),
+      'X-Content-Type-Options': 'nosniff'
+    });
+    res.end(req.method === 'HEAD' ? undefined : html);
+    return true;
+  }
+  if (!stat.isFile()) return false;
+  return sendFile(filename, req, res);
+}
+
+async function sendFile(filename, req, res) {
+  const file = await fs.open(filename, 'r');
+  let streaming = false;
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile()) return false;
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const since = Date.parse(req.headers['if-modified-since']);
+    if (Number.isFinite(since) && Math.floor(stat.mtimeMs / 1000) * 1000 <= since) {
+      res.writeHead(304);
+      res.end();
+      return true;
+    }
+    res.setHeader('Content-Length', stat.size);
+    res.setHeader('Content-Type', mime.contentType(mime.lookup(filename) || 'application/octet-stream'));
+    res.statusCode = 200;
+    if (req.method === 'HEAD') {
+      res.end();
+      return true;
+    }
+    const stream = file.createReadStream();
+    streaming = true;
+    // pipeline closes the file and response on completion, errors or disconnects.
+    pipeline(stream, res, () => {});
+    return true;
+  } finally {
+    if (!streaming) await file.close();
+  }
 }
