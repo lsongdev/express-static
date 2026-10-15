@@ -1,13 +1,12 @@
-const http = require('http');
-const kelp = require('kelp');
-const logs = require('kelp-logger');
-const serve = require('../');
+'use strict';
 
-const app = kelp();
+const http = require('node:http');
+const serve = require('..');
 
-app.use(logs)
-app.use(serve(__dirname, {
-  listDirectory: true
-}));
-
-http.createServer(app).listen(3000);
+const middleware = serve(__dirname, { listDirectory: true });
+http.createServer((req, res) => {
+  middleware(req, res, err => {
+    res.statusCode = err ? err.statusCode || 500 : 404;
+    res.end(err ? 'Unable to serve file' : 'Not Found');
+  });
+}).listen(3000);

@@ -1,18 +1,16 @@
 #!/usr/bin/env node
-
 'use strict';
-const http = require('http');
-const kelp = require('kelp');
-const logger = require('kelp-logger');
+
+const http = require('node:http');
 const serve = require('..');
 
-const app = kelp();
-
-app.use(logger);
-app.use(serve('.', { listDirectory: true }));
-app.use((_, res) => res.end('Not Found'));
-
-const server = http.createServer(app);
-server.listen(process.env.PORT || 8000, function () {
-  console.log('server is running at %j', server.address().port);
+const middleware = serve(process.argv[2] || '.', { listDirectory: true });
+const server = http.createServer((req, res) => {
+  middleware(req, res, err => {
+    res.statusCode = err ? err.statusCode || 500 : 404;
+    res.end(err ? http.STATUS_CODES[res.statusCode] || 'Internal Server Error' : 'Not Found');
+  });
+});
+server.listen(process.env.PORT || 8000, () => {
+  console.log('Static server listening on port %s', server.address().port);
 });

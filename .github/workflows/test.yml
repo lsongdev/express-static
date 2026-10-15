@@ -12,11 +12,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -27,6 +28,6 @@ jobs:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
       - name: Install test dependencies
-        run: npm install --omit=dev --ignore-scripts --no-package-lock
+        run: npm ci --ignore-scripts
       - name: Run regression tests
         run: npm test
